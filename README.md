@@ -56,3 +56,47 @@ https://docs.confluent.io/current/schema-registry/index.html?_ga=2.217009494.130
 
 ## Storage is partitioned
 - Kafka topics are partitioned, meaning a topic is spread over a number of “buckets” located on different brokers. This distributed placement of your data is very important for scalability because it allows client applications to read the data from many brokers at the same time.
+
+- When creating a topic, you must choose the number of partitions it should contain. Each partition then contains one specific subset of the full data in a topic (see partitioning in databases and partitioning of a set). To make your data fault tolerant, every partition can be replicated, even across geo-regions or datacenters, so that there are always multiple brokers that have a copy of the data just in case things go wrong, you want to do maintenance on the brokers, and so on. A common setting in production is a replication factor of 3 for a total of three copies.
+
+## Event producers determine event partitioning
+Producers determine event partitioning—how events will be spread over the various partitions in a topic. More specifically, they use a partitioning function ƒ(event.key, event.value) to decide which partition of a topic an event is being sent to. The default partitioning function is ƒ(event.key, event.value) = hash(event.key) % numTopicPartitions so that, in most cases, events will be spread evenly across the available topic partitions (we will later discuss what happens when this is not the case). The partitioning function actually provides you with further information in addition to the event key for determining the desired target partition, such as the topic name and cluster metadata.
+
+## How to partition your events: Same event key to same partition
+The primary goal of partitioning is the ordering of events: producers should send “related” events to the same partition because Kafka guarantees the ordering of events only within a given partition of a topic—not across partitions of the same topic.
+
+To give an example of how to partition a topic, consider producers that publish geo-location updates of trucks for a logistics company. In this scenario, any events about the same truck should always be sent to one and the same partition. This can be achieved by picking a unique identifier for each truck as the event key (e.g., its licensing plate or vehicle identification number), in combination with the default partitioning function.
+
+However, there is another reason why partitioning matters. Stream processing applications typically operate in so-called Kafka consumer groups that all read from the same topic(s) for collaborative processing of data in parallel. In such cases, it’s important to be able to control which partitions go to different participants within the same group.
+
+So, what are the most common reasons why events with the same event key may end up in different partitions? Two causes stand out:
+
+1) *Topic configuration*: someone increased the number of partitions of a topic. In this scenario, the default partitioning function ƒ(event.key, event.value) now assigns different target partitions for at least some of the events because the modulo parameter has changed.
+2) *Producer configuration*: a producer uses a custom partitioning function.
+
+My tip: if in doubt, use 30 partitions per topic. This is a good number because (a) it is high enough to cover some really high-throughput requirements, (b) it is low enough that you will not hit the limit anytime soon of how many partitions a single broker can handle, even if you create many topics in your Kafka cluster, and (c) it is a highly composite number as it is evenly divisible by 1, 2, 3, 5, 6, 10, 15, and 30. This benefits the processing layer because it results in a more even workload distribution across application instances when horizontally scaling out (adding app instances) and scaling in (removing instances). Since Kafka supports hundreds of thousands of partitions in a cluster, this over-partitioning strategy is a safe approach for most users.
+
+# From storage to processing
+Topics live in Kafka’s storage layer—they are part of the Kafka “filesystem” powered by the brokers. In contrast, streams and tables are concepts of Kafka’s processing layer, used in tools like ksqlDB and Kafka Streams. These tools process your events stored in “raw” topics by turning them into streams and tables—a process that is conceptually very similar to how a relational database turns the bytes in files on disk into an RDBMS table for you to work with.
+
+An **event stream** in Kafka is a topic with a schema. Keys and values of events are no longer opaque byte arrays but have specific types, so we know what’s in the data. Like a topic, a stream is unbounded.
+
+The following examples use the Java notation of `<eventKey, eventValue>` for the data types of event key and value, respectively. For instance, `<byte[], String>` means that the event key is an array of raw bytes, and the event value is a String, i.e., textual data like a `VARCHAR`. More complex data types can be used, such as an Apache Avro™ schema that defines a `GeoLocation` type.
+
+**Example #1**: A `<byte[], byte[]>` topic is read and deserialized by a consumer client as a `<String, String>` stream of geolocation events. Or, we could use a better type setup and read it as a `<User, GeoLocation>` stream, which is what I’d prefer.
+
+Here are code examples for how to read a topic as a stream:
+
+- ksqlDB:
+```
+-- Create ksqlDB stream from Kafka topic.
+CREATE STREAM myStream (username VARCHAR, location VARCHAR)
+  WITH (KAFKA_TOPIC='input-topic', VALUE_FORMAT='...');
+```
+- Kafka Streams:
+```
+// Create KStream from Kafka topic.
+StreamsBuilder builder = new StreamsBuilder();
+KStream<String, String> stream =
+  builder.stream("input-topic", Consumed.with(Serdes.String(), Serdes.String()));
+```
